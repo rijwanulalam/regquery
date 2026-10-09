@@ -1,0 +1,37 @@
+7-Zip
+Apple Inc.
+BraveSoftware
+Classes
+Clients
+DefaultUserEnvironment
+Dolby
+Fortemedia
+GitForWindows
+Google
+IM Providers
+Intel
+Lenovo
+Microsoft
+Mozilla
+mozilla.org
+MozillaPlugins
+Notepad++
+ODBC
+OEM
+Open Source
+OpenSSH
+OpenVPN
+OpenVPNConnect
+Partner
+Policies
+Python
+Realtek
+RegisteredApplications
+Setup
+Synaptics
+SyncIntegrationClients
+Tenorshare
+VMware, Inc.
+Windows
+WinRAR
+WOW6432Node
