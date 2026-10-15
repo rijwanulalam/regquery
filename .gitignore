@@ -1,0 +1,13 @@
+# Keys - never push these
+config.json
+.streamlit/secrets.toml
+
+# Scan results and logs from your PC
+regquery.txt
+softwares.txt
+blacklist_softwares.txt
+scanner_log.txt
+
+# Python stuff
+.venv/
+__pycache__/

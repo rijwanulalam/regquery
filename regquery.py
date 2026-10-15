@@ -1,66 +1,67 @@
-'''import subprocess
+"""
+regquery.py - the Streamlit dashboard.
 
-# Step 1: Run "reg query HKLM\SOFTWARE" and get its output as text
-result = subprocess.run(["reg", "query", r"HKLM\SOFTWARE"], capture_output=True, text=True)
+Reads the scans that scanner.py sends to Supabase and shows them with
+charts. Works the same on your PC and on Streamlit Cloud.
 
-# Step 2: Save the output to regquery.txt
-with open("regquery.txt", "w") as file:
-    file.write(result.stdout)
+Run it with:  python -m streamlit run regquery.py
+"""
 
-# Step 3: Read regquery.txt line by line and write the software names to softwares.txt
-with open("regquery.txt", "r") as infile, open("softwares.txt", "w") as outfile:
-    for line in infile:
-        line = line.strip()
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
 
-        # Only keep lines that are registry keys, skip blank lines
-        if line.startswith("HKEY_LOCAL_MACHINE"):
-            # The software name is the part after the last backslash
-            software = line.split("\\")[-1]
-            outfile.write(software + "\n")
-
-print("Done! Check softwares.txt")
-'''
-
-import platform
-import subprocess
-from datetime import datetime
 import streamlit as st
 
 # ---------- Page setup ----------
 st.set_page_config(page_title="Software Scanner", page_icon="🛡️", layout="wide")
 st.title("🛡️ Software Scanner")
-st.write("Live view of software in `HKLM\\SOFTWARE`, with blacklisted ones flagged.")
+st.write("Live software scans from your Windows PCs, stored in Supabase.")
 
-# The registry only exists on Windows. On Streamlit Cloud (Linux)
-# you upload a regquery.txt file instead.
-on_windows = platform.system() == "Windows"
-
-
-# ---------- Helper functions ----------
-def get_names(text):
-    """Go through the reg query output line by line and return the software names."""
-    names = []
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("HKEY_LOCAL_MACHINE"):
-            names.append(line.split("\\")[-1])  # part after the last backslash
-    return names
+# ---------- Supabase connection ----------
+# The URL and key come from Streamlit secrets, never from the code itself
+try:
+    SUPABASE_URL = st.secrets["SUPABASE_URL"].rstrip("/")
+    PUBLISHABLE_KEY = st.secrets["SUPABASE_PUBLISHABLE_KEY"]
+except Exception:
+    st.error("Supabase secrets are missing. Add SUPABASE_URL and "
+             "SUPABASE_PUBLISHABLE_KEY to .streamlit/secrets.toml, or to the "
+             "app's Secrets on Streamlit Cloud.")
+    st.stop()
 
 
-def scan_registry():
-    """Run reg query on this computer, save it to regquery.txt, and return the names."""
-    result = subprocess.run(["reg", "query", r"HKLM\SOFTWARE"], capture_output=True, text=True)
-    with open("regquery.txt", "w") as file:
-        file.write(result.stdout)
-    return get_names(result.stdout)
+def supabase_get(path):
+    """Read data from the Supabase REST API and return it as Python lists/dicts."""
+    request = urllib.request.Request(
+        SUPABASE_URL + "/rest/v1/" + path,
+        headers={"apikey": PUBLISHABLE_KEY},  # Supabase keys go in the apikey header
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return json.loads(response.read().decode("utf-8"))
 
 
-def read_uploaded_file(uploaded_file):
-    """Turn an uploaded file into text. Handles both UTF-16 and UTF-8 files."""
-    data = uploaded_file.getvalue()
-    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):  # PowerShell '>' saves UTF-16
-        return data.decode("utf-16")
-    return data.decode("utf-8-sig", errors="replace")
+# ---------- Small helpers ----------
+def seconds_since(timestamp):
+    """How many seconds ago a Supabase timestamp was."""
+    then = datetime.fromisoformat(timestamp)
+    return (datetime.now(timezone.utc) - then).total_seconds()
+
+
+def time_ago(timestamp):
+    """Turn a timestamp into friendly text like '12 seconds ago'."""
+    seconds = int(seconds_since(timestamp))
+    if seconds < 60:
+        amount, unit = seconds, "second"
+    elif seconds < 3600:
+        amount, unit = seconds // 60, "minute"
+    elif seconds < 86400:
+        amount, unit = seconds // 3600, "hour"
+    else:
+        amount, unit = seconds // 86400, "day"
+    # add an "s" unless it's exactly 1, e.g. "1 minute" but "5 minutes"
+    return f"{amount} {unit}{'' if amount == 1 else 's'} ago"
 
 
 # ---------- Sidebar ----------
@@ -83,17 +84,36 @@ def is_blacklisted(name):
     return False
 
 
+st.sidebar.header("Live refresh")
+auto_refresh = st.sidebar.toggle("Auto refresh", value=True)
+seconds = st.sidebar.number_input("Dashboard refreshes every (seconds)", min_value=10, value=60, step=10)
+
+# Must match the Task Scheduler schedule (every 12 hours)
+task_hours = st.sidebar.number_input("Scanner task runs every (hours)", min_value=1, value=12, step=1)
+
+# ---------- Pick a computer ----------
+try:
+    computers = supabase_get("computers?select=computer_name&order=last_scan.desc")
+except urllib.error.HTTPError as error:
+    st.error(f"Supabase error {error.code}: {error.read().decode()}")
+    st.stop()
+except urllib.error.URLError as error:
+    st.error(f"Could not reach Supabase: {error.reason}")
+    st.stop()
+
+if not computers:
+    st.info("No scans yet. Start **scanner.py** on your Windows PC, "
+            "then reload this page.")
+    st.stop()
+
+computer_names = [row["computer_name"] for row in computers]
+computer = st.sidebar.selectbox("Computer", computer_names)
+
+
 # ---------- The dashboard (numbers, charts, table) ----------
-def show_dashboard(software):
+def show_dashboard(software, history):
     blacklisted = [name for name in software if is_blacklisted(name)]
     clean_count = len(software) - len(blacklisted)
-
-    # Save both lists to text files, like the original script
-    if on_windows:
-        with open("softwares.txt", "w") as file:
-            file.write("\n".join(software))
-        with open("blacklist_softwares.txt", "w") as file:
-            file.write("\n".join(blacklisted))
 
     # Summary numbers
     col1, col2, col3 = st.columns(3)
@@ -146,6 +166,19 @@ def show_dashboard(software):
     st.write(f"**{percent:.1%} of software is blacklisted**")
     st.progress(percent)
 
+    # History chart: one point for every time the software list changed
+    st.write("**Software count over time**")
+    if len(history) >= 2:
+        times, totals, flagged = [], [], []
+        for scan in reversed(history):  # oldest first
+            times.append(datetime.fromisoformat(scan["scanned_at"]))
+            totals.append(len(scan["software"]))
+            flagged.append(sum(1 for name in scan["software"] if is_blacklisted(name)))
+        st.line_chart({"Time": times, "Total": totals, "Blacklisted": flagged},
+                      x="Time", y=["Total", "Blacklisted"], color=["#3498db", "#e74c3c"])
+    else:
+        st.caption("This chart appears after the software list changes at least once.")
+
     # Search and filter
     st.subheader("Software list")
     search = st.text_input("Search by name")
@@ -171,52 +204,47 @@ def show_dashboard(software):
                          file_name="blacklist_softwares.txt")
 
 
-# ---------- On Windows: live, auto-refreshing scan ----------
-if on_windows:
-    st.sidebar.header("Live refresh")
-    auto_refresh = st.sidebar.toggle("Auto refresh", value=True)
-    seconds = st.sidebar.number_input("Refresh every (seconds)", min_value=5, value=10, step=5)
+# ---------- Live view: re-reads Supabase on a timer ----------
+refresh_every = seconds if auto_refresh else None  # None = no automatic refresh
 
-    # None means "don't refresh automatically"
-    refresh_every = seconds if auto_refresh else None
 
-    # A fragment is a part of the page that can rerun on its own.
-    # run_every makes Streamlit rerun it on a timer, so the scan stays live.
-    @st.fragment(run_every=refresh_every)
-    def live_view():
-        software = scan_registry()
+@st.fragment(run_every=refresh_every)
+def live_view():
+    name = urllib.parse.quote(computer)
+    try:
+        latest = supabase_get(f"computers?computer_name=eq.{name}&select=software,last_scan")
+        history = supabase_get(f"scan_history?computer_name=eq.{name}"
+                               "&select=software,scanned_at&order=scanned_at.desc&limit=50")
+    except urllib.error.URLError as error:
+        st.error(f"Could not read from Supabase: {error}")
+        return
 
-        # Compare with the previous scan to spot changes
-        previous = st.session_state.get("previous_scan")
-        st.session_state["previous_scan"] = software
+    if not latest:
+        st.warning(f"No scan found for {computer}.")
+        return
+    latest = latest[0]
 
-        st.caption(f"🟢 Last scanned at {datetime.now():%H:%M:%S}")
-
-        if previous is not None:
-            added = [name for name in software if name not in previous]
-            removed = [name for name in previous if name not in software]
-            if added:
-                st.warning("🆕 New since last scan: " + ", ".join(added))
-            if removed:
-                st.info("➖ Removed since last scan: " + ", ".join(removed))
-
-        show_dashboard(software)
-
-    live_view()
-
-# ---------- Anywhere else (e.g. Streamlit Cloud): upload a file ----------
-else:
-    uploaded = st.sidebar.file_uploader("Upload regquery.txt", type="txt")
-    if uploaded is None:
-        st.info("Upload a **regquery.txt** file in the sidebar to start.")
-        st.write("To create the file on a Windows PC:")
-        st.markdown(
-            "1. Press the **Windows key** and type **cmd**\n"
-            "2. Right-click **Command Prompt** and choose **Run as administrator**\n"
-            "3. Click **Yes** when Windows asks for permission\n"
-            "4. Run this command:"
-        )
-        st.code(r"reg query HKLM\SOFTWARE > %USERPROFILE%\Desktop\regquery.txt")
-        st.write("5. The file **regquery.txt** appears on your Desktop. Upload it in the sidebar.")
+    # Is the scheduled task on that PC still running?
+    # If two scheduled runs in a row are missing, call it offline.
+    if seconds_since(latest["last_scan"]) < task_hours * 3600 * 2:
+        st.caption(f"🟢 Scanner on **{computer}** is running on schedule. "
+                   f"Last scan {time_ago(latest['last_scan'])}.")
     else:
-        show_dashboard(get_names(read_uploaded_file(uploaded)))
+        st.warning(f"🔴 Scanner on **{computer}** has missed its scans. "
+                   f"Last scan {time_ago(latest['last_scan'])}. Check the scheduled task on that PC.")
+
+    # Most recent change, from the history table
+    if len(history) >= 2:
+        newest, before = history[0]["software"], history[1]["software"]
+        added = [n for n in newest if n not in before]
+        removed = [n for n in before if n not in newest]
+        when = time_ago(history[0]["scanned_at"])
+        if added:
+            st.warning(f"🆕 Added {when}: " + ", ".join(added))
+        if removed:
+            st.info(f"➖ Removed {when}: " + ", ".join(removed))
+
+    show_dashboard(latest["software"], history)
+
+
+live_view()
