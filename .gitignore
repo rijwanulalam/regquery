@@ -11,3 +11,7 @@ scanner_log.txt
 # Python stuff
 .venv/
 __pycache__/
+
+build/
+dist/
+*.spec
